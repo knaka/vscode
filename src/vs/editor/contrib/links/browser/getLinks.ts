@@ -22,9 +22,16 @@ export class Link implements ILink {
 	private _link: ILink;
 	private readonly _provider: LinkProvider;
 
-	constructor(link: ILink, provider: LinkProvider) {
+	/**
+	 * Higher value means higher priority (i.e. the provider that should win when its
+	 * range intersects or touches a link from a lower-priority provider).
+	 */
+	readonly priority: number;
+
+	constructor(link: ILink, provider: LinkProvider, priority: number) {
 		this._link = link;
 		this._provider = provider;
+		this.priority = priority;
 	}
 
 	toJSON(): ILink {
@@ -79,17 +86,21 @@ export class LinksList {
 	constructor(tuples: [ILinksList, LinkProvider][]) {
 
 		let links: Link[] = [];
+		let priority = 0;
 		for (const [list, provider] of tuples) {
-			// merge all links
-			const newLinks = list.links.map(link => new Link(link, provider));
+			// merge all links. `tuples` is ordered from lowest to highest priority
+			// provider, so its index doubles as a priority: later (== higher priority)
+			// providers should win over earlier ones when ranges overlap.
+			const newLinks = list.links.map(link => new Link(link, provider, priority));
 			links = LinksList._union(links, newLinks);
+			priority++;
 			// register disposables
 			if (isDisposable(list)) {
 				this._disposables ??= new DisposableStore();
 				this._disposables.add(list);
 			}
 		}
-		this.links = links;
+		this.links = LinksList._resolveOverlaps(links);
 	}
 
 	dispose(): void {
@@ -133,6 +144,35 @@ export class LinksList {
 		}
 		for (; newIndex < newLen; newIndex++) {
 			result.push(newLinks[newIndex]);
+		}
+
+		return result;
+	}
+
+	private static _resolveOverlaps(links: Link[]): Link[] {
+		if (links.length <= 1) {
+			return links;
+		}
+
+		// Sort by range start; for links that start at the same position, higher
+		// priority first so it's the one considered "kept" below.
+		const sorted = links.slice().sort((a, b) => {
+			const rangeResult = Range.compareRangesUsingStarts(a.range, b.range);
+			return rangeResult !== 0 ? rangeResult : (b.priority - a.priority);
+		});
+
+		const result: Link[] = [];
+		for (const link of sorted) {
+			const kept = result[result.length - 1];
+			if (kept && Range.areIntersectingOrTouching(kept.range, link.range)) {
+				if (link.priority > kept.priority) {
+					result[result.length - 1] = link;
+				}
+				// else: lower (or equal) priority than what's already kept for this
+				// span, so drop it.
+				continue;
+			}
+			result.push(link);
 		}
 
 		return result;
